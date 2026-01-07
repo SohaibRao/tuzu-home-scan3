@@ -20,6 +20,7 @@ interface SessionContextType {
   setAnalysisProgress: (progress: AnalysisProgress | null) => void;
   refreshSession: () => Promise<void>;
   clearError: () => void;
+  resetSession: () => Promise<void>;
 }
 
 const SessionContext = createContext<SessionContextType | undefined>(undefined);
@@ -158,6 +159,30 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     setError(null);
   }, []);
 
+  const resetSession = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      setError(null);
+
+      // Clear localStorage
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+
+      // Reset all state
+      setSessionId(null);
+      setSession(null);
+      setLocationState(null);
+      setImages([]);
+      setAnalysisProgressState(null);
+
+      // Create new session
+      await initSession();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to reset session');
+    } finally {
+      setIsLoading(false);
+    }
+  }, [initSession]);
+
   // Initialize session on mount
   useEffect(() => {
     initSession();
@@ -181,6 +206,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
         setAnalysisProgress,
         refreshSession,
         clearError,
+        resetSession,
       }}
     >
       {children}

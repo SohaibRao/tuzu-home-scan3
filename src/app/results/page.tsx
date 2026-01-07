@@ -31,7 +31,7 @@ interface ResultsSummary {
 
 export default function ResultsPage() {
   const router = useRouter();
-  const { sessionId, isLoading: sessionLoading, initSession } = useSession();
+  const { sessionId, isLoading: sessionLoading, resetSession } = useSession();
 
   const [results, setResults] = useState<ResultsSummary | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -67,9 +67,10 @@ export default function ResultsPage() {
   }, [sessionId, sessionLoading]);
 
   const handleStartNew = async () => {
-    localStorage.removeItem('tuzu_session_id');
-    await initSession();
-    router.push('/location');
+    if (window.confirm('Start a new scan? Your current results will be cleared.')) {
+      await resetSession();
+      router.push('/location');
+    }
   };
 
   if (sessionLoading || isLoading) {

@@ -24,7 +24,7 @@ const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/heic'];
 
 export default function UploadPage() {
   const router = useRouter();
-  const { sessionId, images, addImage, removeImage, location, isLoading: sessionLoading } = useSession();
+  const { sessionId, images, addImage, removeImage, location, isLoading: sessionLoading, resetSession } = useSession();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const relatedInputRef = useRef<HTMLInputElement>(null);
 
@@ -32,6 +32,8 @@ export default function UploadPage() {
   const [selectedParentId, setSelectedParentId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<ImageType | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [failedUploads, setFailedUploads] = useState<string[]>([]);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
 
   const remainingSlots = MAX_IMAGES - images.length - uploadingFiles.length;
 
@@ -120,13 +122,18 @@ export default function UploadPage() {
       }, 1000);
 
     } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : 'Upload failed';
+
       setUploadingFiles(prev => prev.map(f =>
         f.id === uploadId ? {
           ...f,
           status: 'error',
-          error: error instanceof Error ? error.message : 'Upload failed',
+          error: errorMessage,
         } : f
       ));
+
+      // Track failed upload
+      setFailedUploads(prev => [...prev, file.name]);
 
       setTimeout(() => {
         setUploadingFiles(prev => prev.filter(f => f.id !== uploadId));
@@ -143,14 +150,54 @@ export default function UploadPage() {
       return;
     }
 
-    // Process files sequentially to avoid memory issues on mobile
+    // Validate all files first and collect valid ones
+    const validFiles: File[] = [];
+    const invalidFiles: string[] = [];
+
     for (const file of fileArray) {
       const error = validateFile(file);
       if (error) {
-        alert(error);
-        continue;
+        invalidFiles.push(error);
+      } else {
+        validFiles.push(file);
       }
-      await uploadFile(file, parentImageId);
+    }
+
+    // Show alert for invalid files
+    if (invalidFiles.length > 0) {
+      alert(`${invalidFiles.length} file(s) could not be uploaded:\n\n${invalidFiles.slice(0, 3).join('\n')}${invalidFiles.length > 3 ? `\n...and ${invalidFiles.length - 3} more` : ''}`);
+    }
+
+    // If no valid files, return early
+    if (validFiles.length === 0) {
+      return;
+    }
+
+    // Process valid files sequentially to avoid memory issues
+    // Continue even if some uploads fail
+    let successCount = 0;
+    let failCount = 0;
+
+    setBatchProgress({ current: 0, total: validFiles.length });
+
+    for (let i = 0; i < validFiles.length; i++) {
+      const file = validFiles[i];
+      try {
+        await uploadFile(file, parentImageId);
+        successCount++;
+      } catch (error) {
+        failCount++;
+        console.error(`Failed to upload ${file.name}:`, error);
+      }
+      setBatchProgress({ current: i + 1, total: validFiles.length });
+    }
+
+    // Clear batch progress
+    setBatchProgress(null);
+
+    // Show summary if there were failures
+    if (failCount > 0 && successCount > 0) {
+      console.log(`Upload complete: ${successCount} succeeded, ${failCount} failed`);
     }
   }, [sessionId, remainingSlots]);
 
@@ -327,6 +374,28 @@ export default function UploadPage() {
           onChange={handleRelatedFileChange}
         />
 
+        {/* Batch Upload Progress */}
+        {batchProgress && (
+          <Card className="mb-6 bg-blue-50 border-blue-100">
+            <div className="flex items-center gap-3">
+              <LoadingSpinner size="sm" className="text-[#1e3a5f]" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-gray-900">
+                  Processing batch upload: {batchProgress.current} of {batchProgress.total} files
+                </p>
+                <div className="mt-2">
+                  <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div
+                      className="bg-[#1e3a5f] h-2 rounded-full transition-all duration-300"
+                      style={{ width: `${(batchProgress.current / batchProgress.total) * 100}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Card>
+        )}
+
         {/* Uploading Files */}
         {uploadingFiles.length > 0 && (
           <div className="mb-6 space-y-2">
@@ -401,6 +470,40 @@ export default function UploadPage() {
           </Card>
         )}
 
+        {/* Failed Uploads Warning */}
+        {failedUploads.length > 0 && (
+          <Card className="bg-amber-50 border-amber-200 mb-6">
+            <div className="flex items-start gap-3">
+              <svg className="w-5 h-5 text-amber-600 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+              </svg>
+              <div className="flex-1">
+                <h4 className="font-semibold text-amber-900 mb-1">
+                  {failedUploads.length} Upload{failedUploads.length !== 1 ? 's' : ''} Failed
+                </h4>
+                <p className="text-sm text-amber-800 mb-2">
+                  The following images could not be uploaded. You can continue with the analysis of successfully uploaded images or try uploading them again.
+                </p>
+                <ul className="text-sm text-amber-700 space-y-1 mb-3">
+                  {failedUploads.slice(0, 5).map((name, idx) => (
+                    <li key={idx} className="truncate">• {name}</li>
+                  ))}
+                  {failedUploads.length > 5 && (
+                    <li>• And {failedUploads.length - 5} more...</li>
+                  )}
+                </ul>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setFailedUploads([])}
+                >
+                  Dismiss
+                </Button>
+              </div>
+            </div>
+          </Card>
+        )}
+
         {/* Tips */}
         <Card className="bg-blue-50 border-blue-100 mb-6">
           <h4 className="font-semibold text-[#1e3a5f] mb-2 flex items-center gap-2">
@@ -426,7 +529,7 @@ export default function UploadPage() {
         </Card>
 
         {/* Action Buttons */}
-        <div className="sticky bottom-0 bg-gray-50 py-4 border-t border-gray-200 -mx-4 px-4">
+        <div className="sticky bottom-0 bg-gray-50 py-4 border-t border-gray-200 -mx-4 px-4 space-y-2">
           <Button
             fullWidth
             size="lg"
@@ -435,6 +538,24 @@ export default function UploadPage() {
           >
             {uploadingFiles.length > 0 ? 'Uploading...' : `Analyze ${images.length} Photo${images.length !== 1 ? 's' : ''}`}
           </Button>
+
+          {images.length > 0 && (
+            <Button
+              fullWidth
+              size="lg"
+              variant="outline"
+              onClick={async () => {
+                if (window.confirm('Are you sure you want to start a new scan? All current photos will be removed.')) {
+                  await resetSession();
+                  setFailedUploads([]);
+                  router.push('/location');
+                }
+              }}
+              disabled={uploadingFiles.length > 0}
+            >
+              Start New Scan
+            </Button>
+          )}
         </div>
       </div>
 
