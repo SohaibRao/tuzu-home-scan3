@@ -16,11 +16,14 @@ interface UploadingFile {
   progress: number;
   status: 'uploading' | 'processing' | 'complete' | 'error';
   error?: string;
+  retryCount?: number;
 }
 
 const MAX_IMAGES = 30;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/heic'];
+const MAX_RETRIES = 3; // Retry failed uploads up to 3 times
+const BATCH_SIZE = 5; // Upload 5 files at a time to prevent server overload
 
 export default function UploadPage() {
   const router = useRouter();
@@ -32,8 +35,9 @@ export default function UploadPage() {
   const [selectedParentId, setSelectedParentId] = useState<string | null>(null);
   const [previewImage, setPreviewImage] = useState<ImageType | null>(null);
   const [dragOver, setDragOver] = useState(false);
-  const [failedUploads, setFailedUploads] = useState<string[]>([]);
+  const [failedUploads, setFailedUploads] = useState<{name: string; file: File; parentImageId?: string}[]>([]);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   const remainingSlots = MAX_IMAGES - images.length - uploadingFiles.length;
 
@@ -52,7 +56,7 @@ export default function UploadPage() {
     return null;
   };
 
-  const uploadFile = async (file: File, parentImageId?: string) => {
+  const uploadFile = async (file: File, parentImageId?: string, retryCount = 0): Promise<boolean> => {
     const uploadId = Math.random().toString(36).substring(7);
 
     setUploadingFiles(prev => [...prev, {
@@ -60,6 +64,7 @@ export default function UploadPage() {
       file,
       progress: 0,
       status: 'uploading',
+      retryCount,
     }]);
 
     try {
@@ -121,23 +126,50 @@ export default function UploadPage() {
         setUploadingFiles(prev => prev.filter(f => f.id !== uploadId));
       }, 1000);
 
+      return true; // Upload successful
+
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Upload failed';
 
+      // Retry logic with exponential backoff
+      if (retryCount < MAX_RETRIES) {
+        const nextRetry = retryCount + 1;
+        const delayMs = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
+
+        setUploadingFiles(prev => prev.map(f =>
+          f.id === uploadId ? {
+            ...f,
+            status: 'uploading' as const,
+            error: `Retrying (${nextRetry}/${MAX_RETRIES})...`,
+            retryCount: nextRetry,
+          } : f
+        ));
+
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+
+        // Remove current upload UI and retry
+        setUploadingFiles(prev => prev.filter(f => f.id !== uploadId));
+        return uploadFile(file, parentImageId, nextRetry);
+      }
+
+      // Max retries exhausted
       setUploadingFiles(prev => prev.map(f =>
         f.id === uploadId ? {
           ...f,
           status: 'error',
-          error: errorMessage,
+          error: `${errorMessage} (after ${MAX_RETRIES} retries)`,
         } : f
       ));
 
-      // Track failed upload
-      setFailedUploads(prev => [...prev, file.name]);
+      // Track failed upload with file reference for manual retry
+      setFailedUploads(prev => [...prev, { name: file.name, file, parentImageId }]);
 
       setTimeout(() => {
         setUploadingFiles(prev => prev.filter(f => f.id !== uploadId));
       }, 3000);
+
+      return false; // Upload failed
     }
   };
 
@@ -173,23 +205,33 @@ export default function UploadPage() {
       return;
     }
 
-    // Process valid files sequentially to avoid memory issues
-    // Continue even if some uploads fail
+    // Process valid files in batches to prevent server overload
+    // Upload BATCH_SIZE files concurrently, then move to next batch
     let successCount = 0;
     let failCount = 0;
 
     setBatchProgress({ current: 0, total: validFiles.length });
 
-    for (let i = 0; i < validFiles.length; i++) {
-      const file = validFiles[i];
-      try {
-        await uploadFile(file, parentImageId);
-        successCount++;
-      } catch (error) {
-        failCount++;
-        console.error(`Failed to upload ${file.name}:`, error);
-      }
-      setBatchProgress({ current: i + 1, total: validFiles.length });
+    // Split into batches
+    for (let i = 0; i < validFiles.length; i += BATCH_SIZE) {
+      const batch = validFiles.slice(i, i + BATCH_SIZE);
+
+      // Upload batch concurrently (max BATCH_SIZE at a time)
+      const results = await Promise.all(
+        batch.map(file => uploadFile(file, parentImageId))
+      );
+
+      // Count successes and failures
+      results.forEach(success => {
+        if (success) {
+          successCount++;
+        } else {
+          failCount++;
+        }
+      });
+
+      // Update progress
+      setBatchProgress({ current: Math.min(i + BATCH_SIZE, validFiles.length), total: validFiles.length });
     }
 
     // Clear batch progress
@@ -197,7 +239,7 @@ export default function UploadPage() {
 
     // Show summary if there were failures
     if (failCount > 0 && successCount > 0) {
-      console.log(`Upload complete: ${successCount} succeeded, ${failCount} failed`);
+      console.log(`Upload complete: ${successCount} succeeded, ${failCount} failed after retries`);
     }
   }, [sessionId, remainingSlots]);
 
@@ -406,6 +448,8 @@ export default function UploadPage() {
                 filename={file.file.name}
                 progress={file.progress}
                 status={file.status}
+                error={file.error}
+                retryCount={file.retryCount}
               />
             ))}
           </div>
@@ -482,23 +526,42 @@ export default function UploadPage() {
                   {failedUploads.length} Upload{failedUploads.length !== 1 ? 's' : ''} Failed
                 </h4>
                 <p className="text-sm text-amber-800 mb-2">
-                  The following images could not be uploaded. You can continue with the analysis of successfully uploaded images or try uploading them again.
+                  The following images could not be uploaded after {MAX_RETRIES} automatic retry attempts. You can retry manually or continue with successfully uploaded images.
                 </p>
                 <ul className="text-sm text-amber-700 space-y-1 mb-3">
-                  {failedUploads.slice(0, 5).map((name, idx) => (
-                    <li key={idx} className="truncate">• {name}</li>
+                  {failedUploads.slice(0, 5).map((item, idx) => (
+                    <li key={idx} className="truncate">• {item.name}</li>
                   ))}
                   {failedUploads.length > 5 && (
                     <li>• And {failedUploads.length - 5} more...</li>
                   )}
                 </ul>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setFailedUploads([])}
-                >
-                  Dismiss
-                </Button>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    onClick={async () => {
+                      setIsRetrying(true);
+                      const filesToRetry = [...failedUploads];
+                      setFailedUploads([]); // Clear the list
+
+                      // Retry all failed uploads
+                      for (const { file, parentImageId } of filesToRetry) {
+                        await uploadFile(file, parentImageId, 0);
+                      }
+                      setIsRetrying(false);
+                    }}
+                    disabled={isRetrying}
+                  >
+                    {isRetrying ? 'Retrying...' : `Retry All (${failedUploads.length})`}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setFailedUploads([])}
+                  >
+                    Dismiss
+                  </Button>
+                </div>
               </div>
             </div>
           </Card>

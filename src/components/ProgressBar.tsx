@@ -54,9 +54,11 @@ interface UploadProgressProps {
   filename: string;
   progress: number;
   status: 'uploading' | 'processing' | 'complete' | 'error';
+  error?: string;
+  retryCount?: number;
 }
 
-export function UploadProgress({ filename, progress, status }: UploadProgressProps) {
+export function UploadProgress({ filename, progress, status, error, retryCount }: UploadProgressProps) {
   const statusColors = {
     uploading: 'primary' as const,
     processing: 'warning' as const,
@@ -65,7 +67,7 @@ export function UploadProgress({ filename, progress, status }: UploadProgressPro
   };
 
   const statusText = {
-    uploading: 'Uploading...',
+    uploading: retryCount && retryCount > 0 ? `Retrying...` : 'Uploading...',
     processing: 'Processing...',
     complete: 'Complete',
     error: 'Failed',
@@ -82,7 +84,7 @@ export function UploadProgress({ filename, progress, status }: UploadProgressPro
           status === 'error' ? 'text-red-600' :
           'text-gray-500'
         }`}>
-          {statusText[status]}
+          {error || statusText[status]}
         </span>
       </div>
       <ProgressBar
