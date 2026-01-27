@@ -95,10 +95,45 @@ export async function POST(request: NextRequest) {
       },
     }, { status: 201 });
   } catch (error) {
-    console.error('Upload error:', error);
+    // Enhanced error logging with details
+    console.error('Upload error occurred:', {
+      error: error instanceof Error ? error.message : 'Unknown error',
+      stack: error instanceof Error ? error.stack : undefined,
+      sessionId,
+      filename: file?.name,
+      fileSize: file?.size,
+      fileType: file?.type,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Categorize and return specific error messages
+    let errorMessage = 'Failed to upload image';
+    let statusCode = 500;
+
+    if (error instanceof Error) {
+      if (error.message.includes('ENOSPC')) {
+        errorMessage = 'Server storage full - please try again later';
+        statusCode = 507;
+      } else if (error.message.includes('timeout')) {
+        errorMessage = 'Image processing timeout - file may be too large';
+        statusCode = 408;
+      } else if (error.message.includes('memory')) {
+        errorMessage = 'Server memory limit exceeded - try a smaller image';
+        statusCode = 413;
+      } else if (error.message.toLowerCase().includes('format') || error.message.toLowerCase().includes('invalid')) {
+        errorMessage = 'Invalid or corrupted image file';
+        statusCode = 400;
+      } else {
+        // Include error details in development
+        errorMessage = process.env.NODE_ENV === 'development'
+          ? `Upload failed: ${error.message}`
+          : 'Failed to upload image';
+      }
+    }
+
     return NextResponse.json<ApiResponse>({
       success: false,
-      error: 'Failed to upload image',
-    }, { status: 500 });
+      error: errorMessage,
+    }, { status: statusCode });
   }
 }

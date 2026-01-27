@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
+import imageCompression from 'browser-image-compression';
 import { Button } from '@/components/Button';
 import { Card } from '@/components/Card';
 import { LoadingSpinner } from '@/components/LoadingSpinner';
@@ -23,7 +24,8 @@ const MAX_IMAGES = 30;
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/heic'];
 const MAX_RETRIES = 3; // Retry failed uploads up to 3 times
-const BATCH_SIZE = 5; // Upload 5 files at a time to prevent server overload
+const BATCH_SIZE = 2; // Upload 2 files at a time to prevent server overload
+const UPLOAD_TIMEOUT = 45000; // 45 second timeout for uploads
 
 export default function UploadPage() {
   const router = useRouter();
@@ -56,6 +58,47 @@ export default function UploadPage() {
     return null;
   };
 
+  const compressImage = async (file: File, retryCount = 0): Promise<File> => {
+    // Only compress if file is larger than 2MB
+    const compressionThreshold = 2 * 1024 * 1024; // 2MB
+
+    // Adaptive compression based on retry count
+    // 0: Standard compression (0.8 quality, 2MB max)
+    // 1: Moderate compression (0.6 quality, 1.5MB max, 1800px)
+    // 2: Aggressive compression (0.4 quality, 1MB max, 1400px)
+    // 3+: Maximum compression (0.3 quality, 800KB max, 1200px)
+    const compressionLevels = [
+      { maxSizeMB: 2, maxWidthOrHeight: 2048, quality: 0.8 },
+      { maxSizeMB: 1.5, maxWidthOrHeight: 1800, quality: 0.6 },
+      { maxSizeMB: 1, maxWidthOrHeight: 1400, quality: 0.4 },
+      { maxSizeMB: 0.8, maxWidthOrHeight: 1200, quality: 0.3 },
+    ];
+
+    const level = compressionLevels[Math.min(retryCount, compressionLevels.length - 1)];
+
+    // For first attempt, only compress if file is too large
+    if (retryCount === 0 && file.size <= compressionThreshold) {
+      return file;
+    }
+
+    try {
+      const options = {
+        maxSizeMB: level.maxSizeMB,
+        maxWidthOrHeight: level.maxWidthOrHeight,
+        useWebWorker: true,
+        initialQuality: level.quality,
+        preserveExif: true, // Keep EXIF data for orientation
+      };
+
+      const compressedFile = await imageCompression(file, options);
+      console.log(`[Retry ${retryCount}] Compressed ${file.name} from ${(file.size / 1024 / 1024).toFixed(2)}MB to ${(compressedFile.size / 1024 / 1024).toFixed(2)}MB`);
+      return compressedFile;
+    } catch (error) {
+      console.error('Compression failed, using original file:', error);
+      return file;
+    }
+  };
+
   const uploadFile = async (file: File, parentImageId?: string, retryCount = 0): Promise<boolean> => {
     const uploadId = Math.random().toString(36).substring(7);
 
@@ -68,40 +111,80 @@ export default function UploadPage() {
     }]);
 
     try {
+      // Compress image before upload (adaptive compression based on retry count)
+      const compressedFile = await compressImage(file, retryCount);
+
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', compressedFile);
       formData.append('sessionId', sessionId!);
       if (parentImageId) {
         formData.append('parentImageId', parentImageId);
       }
 
-      // Simulate progress for better UX
-      const progressInterval = setInterval(() => {
-        setUploadingFiles(prev => prev.map(f =>
-          f.id === uploadId && f.progress < 90
-            ? { ...f, progress: f.progress + 10 }
-            : f
-        ));
-      }, 200);
+      // Use XMLHttpRequest for real progress tracking
+      const data = await new Promise<{ data: { imageId: string; thumbnailUrl: string; originalUrl: string } }>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
 
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
+        // Timeout handling
+        const timeoutId = setTimeout(() => {
+          xhr.abort();
+          reject(new Error('Upload timeout - please try again'));
+        }, UPLOAD_TIMEOUT);
+
+        // Track upload progress
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable) {
+            const percentComplete = Math.round((e.loaded / e.total) * 90); // 0-90% for upload
+            setUploadingFiles(prev => prev.map(f =>
+              f.id === uploadId ? { ...f, progress: percentComplete } : f
+            ));
+          }
+        });
+
+        // Handle completion
+        xhr.addEventListener('load', () => {
+          clearTimeout(timeoutId);
+
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const response = JSON.parse(xhr.responseText);
+              if (response.success) {
+                // Update to processing (90-100%)
+                setUploadingFiles(prev => prev.map(f =>
+                  f.id === uploadId ? { ...f, progress: 100, status: 'processing' } : f
+                ));
+                resolve(response);
+              } else {
+                reject(new Error(response.error || 'Upload failed'));
+              }
+            } catch (e) {
+              reject(new Error('Invalid server response'));
+            }
+          } else {
+            try {
+              const error = JSON.parse(xhr.responseText);
+              reject(new Error(error.error || `Upload failed with status ${xhr.status}`));
+            } catch (e) {
+              reject(new Error(`Upload failed with status ${xhr.status}`));
+            }
+          }
+        });
+
+        // Handle errors
+        xhr.addEventListener('error', () => {
+          clearTimeout(timeoutId);
+          reject(new Error('Network error - check your connection'));
+        });
+
+        xhr.addEventListener('abort', () => {
+          clearTimeout(timeoutId);
+          reject(new Error('Upload cancelled'));
+        });
+
+        // Send request
+        xhr.open('POST', '/api/upload');
+        xhr.send(formData);
       });
-
-      clearInterval(progressInterval);
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Upload failed');
-      }
-
-      const data = await response.json();
-
-      // Update to processing
-      setUploadingFiles(prev => prev.map(f =>
-        f.id === uploadId ? { ...f, progress: 100, status: 'processing' } : f
-      ));
 
       // Add image to session
       const newImage: ImageType = {
@@ -129,10 +212,36 @@ export default function UploadPage() {
       return true; // Upload successful
 
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Upload failed';
+      // Enhanced error handling with categorization
+      let errorMessage = 'Upload failed';
+      let shouldRetry = true;
 
-      // Retry logic with exponential backoff
-      if (retryCount < MAX_RETRIES) {
+      if (error instanceof Error) {
+        errorMessage = error.message;
+
+        // Categorize errors for better user feedback
+        if (error.name === 'AbortError') {
+          errorMessage = 'Upload timeout - network may be slow';
+        } else if (errorMessage.includes('Network') || errorMessage.includes('Failed to fetch')) {
+          errorMessage = 'Network error - check your connection';
+        } else if (errorMessage.includes('storage full') || errorMessage.includes('507')) {
+          errorMessage = 'Server storage full - try again later';
+          shouldRetry = false; // Don't retry if server is full
+        } else if (errorMessage.includes('Invalid or corrupted')) {
+          errorMessage = 'Invalid image file';
+          shouldRetry = false; // Don't retry corrupted files
+        }
+      }
+
+      console.error(`Upload failed for ${file.name}:`, {
+        error: errorMessage,
+        retryCount,
+        fileSize: file.size,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Retry logic with exponential backoff and adaptive compression
+      if (retryCount < MAX_RETRIES && shouldRetry) {
         const nextRetry = retryCount + 1;
         const delayMs = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
 
@@ -140,7 +249,7 @@ export default function UploadPage() {
           f.id === uploadId ? {
             ...f,
             status: 'uploading' as const,
-            error: `Retrying (${nextRetry}/${MAX_RETRIES})...`,
+            error: `Retrying with compression (${nextRetry}/${MAX_RETRIES})...`,
             retryCount: nextRetry,
           } : f
         ));
