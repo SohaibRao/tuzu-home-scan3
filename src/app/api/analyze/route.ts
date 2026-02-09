@@ -3,7 +3,7 @@ import { getSession, updateSession, updateImageInSession } from '@/lib/session-s
 import { getImageBuffer } from '@/lib/image-processor';
 import { analyzeMultipleImages } from '@/lib/openai';
 import { ApiResponse, Session } from '@/types';
-
+//aaa
 // POST - Trigger analysis for session
 export async function POST(request: NextRequest) {
   try {
