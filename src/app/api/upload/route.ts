@@ -9,10 +9,13 @@ const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/heic'];
 const MAX_IMAGES_PER_SESSION = parseInt(process.env.MAX_IMAGES_PER_SESSION || '30');
 
 export async function POST(request: NextRequest) {
+  let sessionId: string | null = null;
+  let file: File | null = null;
+
   try {
     const formData = await request.formData();
-    const file = formData.get('file') as File | null;
-    const sessionId = formData.get('sessionId') as string | null;
+    file = formData.get('file') as File | null;
+    sessionId = formData.get('sessionId') as string | null;
     const parentImageId = formData.get('parentImageId') as string | null;
 
     // Validate session
